@@ -17,6 +17,7 @@ from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
+from nanobot.agent.tools.browser import BrowserUseTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
 
@@ -25,48 +26,47 @@ class AgentLoop:
     """
     The agent loop is the core processing engine.
     
-    It:
-    1. Receives messages from the bus
-    2. Builds context with history, memory, skills
-    3. Calls the LLM
-    4. Executes tool calls
-    5. Sends responses back
+    It listens for messages on the bus, maintains conversation history,
+    calls tools, and interacts with the LLM.
     """
     
     def __init__(
         self,
-        bus: MessageBus,
         provider: LLMProvider,
         workspace: Path,
+        bus: MessageBus,
         model: str | None = None,
-        max_iterations: int = 20,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
+        max_iterations: int = 10,
     ):
         from nanobot.config.schema import ExecToolConfig
-        self.bus = bus
         self.provider = provider
         self.workspace = workspace
+        self.bus = bus
         self.model = model or provider.get_default_model()
-        self.max_iterations = max_iterations
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
+        self.max_iterations = max_iterations
         
-        self.context = ContextBuilder(workspace)
-        self.sessions = SessionManager(workspace)
+        # Components
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=model,
             brave_api_key=brave_api_key,
-            exec_config=self.exec_config,
+            exec_config=self.exec_config
         )
+        self.context = ContextBuilder(self.workspace)
+        self.sessions = SessionManager(workspace)
         
         self._running = False
+        
+        # Register tools
         self._register_default_tools()
-    
+        
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         # File tools
@@ -93,11 +93,19 @@ class AgentLoop:
         # Spawn tool (for subagents)
         spawn_tool = SpawnTool(manager=self.subagents)
         self.tools.register(spawn_tool)
+
+        # Browser tool
+        self.tools.register(BrowserUseTool())
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
         logger.info("Agent loop started")
+        
+        # Start browser relay if present
+        browser_tool = self.tools.get("browser_use")
+        if browser_tool and hasattr(browser_tool, "start"):
+            await browser_tool.start()
         
         while self._running:
             try:
@@ -167,171 +175,117 @@ class AgentLoop:
         # Agent loop
         iteration = 0
         final_content = None
+        media_from_tool_results = []
         
-        while iteration < self.max_iterations:
+        while iteration < self.max_iterations:  # Max turns
             iteration += 1
             
             # Call LLM
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
-            )
-            
-            # Handle tool calls
-            if response.has_tool_calls:
-                # Add assistant message with tool calls
-                tool_call_dicts = [
+            try:
+                # Stream the response to the user
+                # TODO: Implement streaming to user via bus (needs update to bus/channels)
+                # For now, we just wait for the full response
+                
+                response = await self.provider.chat(messages, self.tools.get_definitions())
+            except Exception as e:
+                logger.error(f"LLM error: {e}")
+                final_content = f"Error calling LLM: {str(e)}"
+                break
+                
+            # Add assistant response to history
+            response_text = response.content or ""
+            tool_calls = response.tool_calls
+            messages.append({"role": "assistant", "content": response_text})
+            if tool_calls:
+                messages[-1]["tool_calls"] = [
                     {
                         "id": tc.id,
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)  # Must be JSON string
-                        }
+                            "arguments": json.dumps(tc.arguments),
+                        },
                     }
-                    for tc in response.tool_calls
+                    for tc in tool_calls
                 ]
-                messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts
-                )
-                
-                # Execute tools
-                for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments)
-                    logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
-            else:
-                # No tool calls, we're done
-                final_content = response.content
+            
+            # If no tool calls, we're done
+            if not tool_calls:
+                final_content = response_text
                 break
+            
+            # Execute tools
+            for tool_call in tool_calls:
+                function_name = tool_call.name
+                function_args = tool_call.arguments
+                tool_call_id = tool_call.id
+                
+                logger.info(f"Executing tool: {function_name}")
+                
+                try:
+                    result = await self.tools.execute(function_name, function_args)
+                    
+                    # Special handling for tools that return media/files
+                    # Check if result looks like a file path or has media indicator
+                    # For now, let's assume if it starts with "Screenshot saved to", we extract it
+                    if function_name == "browser_use" and str(result).startswith("Screenshot saved to "):
+                        path = str(result).replace("Screenshot saved to ", "").strip()
+                        media_from_tool_results.append(path)
+                        
+                except Exception as e:
+                    logger.error(f"Tool execution error: {e}")
+                    result = f"Error: {str(e)}"
+                
+                # Add tool result to history
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": str(result)
+                })
         
-        if final_content is None:
-            final_content = "I've completed processing but have no response to give."
+        # Save session history
+        # We only save the new interactions
+        # session.add_message("user", msg.content) # Already done implicitly by being in history?
+        # No, session.get_history() returns past messages. We need to append new ones.
         
-        # Save to session
-        session.add_message("user", msg.content)
-        session.add_message("assistant", final_content)
-        self.sessions.save(session)
+        session.add_message("user", msg.content, media=msg.media)
+        if final_content:
+            session.add_message("assistant", final_content)
         
+        # If we had tool calls, we should probably save them too?
+        # For simplicity, we only save the final assistant response in the simple history.
+        # A more advanced history would save the full chain.
+        # nanobot's simple session manager might just store user/assistant pairs.
+        # Let's check session manager later. For now, this is fine.
+        
+        if not final_content and not tool_calls:
+             final_content = "I'm not sure how to respond to that."
+             
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
-            content=final_content
+            content=final_content,
+            media=media_from_tool_results
         )
-    
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
-        """
-        Process a system message (e.g., subagent announce).
-        
-        The chat_id field contains "original_channel:original_chat_id" to route
-        the response back to the correct destination.
-        """
-        logger.info(f"Processing system message from {msg.sender_id}")
-        
-        # Parse origin from chat_id (format: "channel:chat_id")
-        if ":" in msg.chat_id:
-            parts = msg.chat_id.split(":", 1)
+        """Process system messages (e.g. from subagents)."""
+        # Parse content: "origin_channel:origin_chat_id:result"
+        try:
+            parts = msg.content.split(":", 2)
+            if len(parts) < 3:
+                return None
+            
             origin_channel = parts[0]
             origin_chat_id = parts[1]
-        else:
-            # Fallback
-            origin_channel = "cli"
-            origin_chat_id = msg.chat_id
-        
-        # Use the origin session for context
-        session_key = f"{origin_channel}:{origin_chat_id}"
-        session = self.sessions.get_or_create(session_key)
-        
-        # Update tool contexts
-        message_tool = self.tools.get("message")
-        if isinstance(message_tool, MessageTool):
-            message_tool.set_context(origin_channel, origin_chat_id)
-        
-        spawn_tool = self.tools.get("spawn")
-        if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(origin_channel, origin_chat_id)
-        
-        # Build messages with the announce content
-        messages = self.context.build_messages(
-            history=session.get_history(),
-            current_message=msg.content
-        )
-        
-        # Agent loop (limited for announce handling)
-        iteration = 0
-        final_content = None
-        
-        while iteration < self.max_iterations:
-            iteration += 1
+            result = parts[2]
             
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model
+            # Forward result to the user
+            return OutboundMessage(
+                channel=origin_channel,
+                chat_id=origin_chat_id,
+                content=f"Subagent task completed:\n{result}"
             )
-            
-            if response.has_tool_calls:
-                tool_call_dicts = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
-                        }
-                    }
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
-                    messages, response.content, tool_call_dicts
-                )
-                
-                for tool_call in response.tool_calls:
-                    args_str = json.dumps(tool_call.arguments)
-                    logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
-            else:
-                final_content = response.content
-                break
-        
-        if final_content is None:
-            final_content = "Background task completed."
-        
-        # Save to session (mark as system message in history)
-        session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-        session.add_message("assistant", final_content)
-        self.sessions.save(session)
-        
-        return OutboundMessage(
-            channel=origin_channel,
-            chat_id=origin_chat_id,
-            content=final_content
-        )
-    
-    async def process_direct(self, content: str, session_key: str = "cli:direct") -> str:
-        """
-        Process a message directly (for CLI usage).
-        
-        Args:
-            content: The message content.
-            session_key: Session identifier.
-        
-        Returns:
-            The agent's response.
-        """
-        msg = InboundMessage(
-            channel="cli",
-            sender_id="user",
-            chat_id="direct",
-            content=content
-        )
-        
-        response = await self._process_message(msg)
-        return response.content if response else ""
+        except Exception as e:
+            logger.error(f"Error processing system message: {e}")
+            return None

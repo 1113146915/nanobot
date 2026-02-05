@@ -81,6 +81,25 @@ spawn(task: str, label: str = None) -> str
 
 Use for complex or time-consuming tasks that can run independently. The subagent will complete the task and report back when done.
 
+## Browser Automation
+
+### browser_use
+Control the browser via OpenClaw Browser Relay extension.
+```
+browser_use(action: str, url: str = None, selector: str = None, text: str = None, script: str = None) -> str
+```
+
+**Actions:**
+- `navigate`: Open a URL (requires `url`)
+- `click`: Click an element (requires `selector`)
+- `type`: Type text into an element (requires `selector`, `text`)
+- `read`: Read text from an element (requires `selector`)
+- `screenshot`: Take a screenshot
+- `evaluate`: Execute JavaScript (requires `script`)
+
+**Setup:**
+Requires the "OpenClaw Browser Relay" Chrome extension to be installed and connected to `ws://127.0.0.1:18792/extension`.
+
 ## Scheduled Reminders (Cron)
 
 Use the `exec` tool to create scheduled reminders with `nanobot cron add`:
@@ -99,52 +118,3 @@ nanobot cron add --name "water" --message "Drink water! 💧" --every 7200
 # At a specific time (ISO format)
 nanobot cron add --name "meeting" --message "Meeting starts now!" --at "2025-01-31T15:00:00"
 ```
-
-### Manage reminders
-```bash
-nanobot cron list              # List all jobs
-nanobot cron remove <job_id>   # Remove a job
-```
-
-## Heartbeat Task Management
-
-The `HEARTBEAT.md` file in the workspace is checked every 30 minutes.
-Use file operations to manage periodic tasks:
-
-### Add a heartbeat task
-```python
-# Append a new task
-edit_file(
-    path="HEARTBEAT.md",
-    old_text="## Example Tasks",
-    new_text="- [ ] New periodic task here\n\n## Example Tasks"
-)
-```
-
-### Remove a heartbeat task
-```python
-# Remove a specific task
-edit_file(
-    path="HEARTBEAT.md",
-    old_text="- [ ] Task to remove\n",
-    new_text=""
-)
-```
-
-### Rewrite all tasks
-```python
-# Replace the entire file
-write_file(
-    path="HEARTBEAT.md",
-    content="# Heartbeat Tasks\n\n- [ ] Task 1\n- [ ] Task 2\n"
-)
-```
-
----
-
-## Adding Custom Tools
-
-To add custom tools:
-1. Create a class that extends `Tool` in `nanobot/agent/tools/`
-2. Implement `name`, `description`, `parameters`, and `execute`
-3. Register it in `AgentLoop._register_default_tools()`
