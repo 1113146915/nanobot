@@ -66,6 +66,17 @@ class ChannelManager:
                 logger.info("Feishu channel enabled")
             except ImportError as e:
                 logger.warning(f"Feishu channel not available: {e}")
+
+        # JsonBot channel
+        if self.config.channels.json_bot.enabled:
+            try:
+                from nanobot.channels.json_bot import JsonBotChannel
+                self.channels["json_bot"] = JsonBotChannel(
+                    self.config.channels.json_bot, self.bus
+                )
+                logger.info("JsonBot channel enabled")
+            except ImportError as e:
+                logger.warning(f"JsonBot channel not available: {e}")
     
     async def start_all(self) -> None:
         """Start WhatsApp channel and the outbound dispatcher."""

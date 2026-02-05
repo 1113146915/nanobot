@@ -66,9 +66,9 @@ web_fetch(url: str, extractMode: str = "markdown", maxChars: int = 50000) -> str
 ## Communication
 
 ### message
-Send a message to the user (used internally).
+Send a message to the user. You can send text content and optionally attach files (media) by providing their paths.
 ```
-message(content: str, channel: str = None, chat_id: str = None) -> str
+message(content: str, channel: str = None, chat_id: str = None, media: list[str] = None) -> str
 ```
 
 ## Background Tasks

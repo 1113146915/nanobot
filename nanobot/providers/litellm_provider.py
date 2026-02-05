@@ -154,8 +154,14 @@ class LiteLLMProvider(LLMProvider):
                 )
             
             # In fallback mode, we assume 'model' is correct for the provider.
-            # E.g. for OpenRouter: "anthropic/claude..."
-            # For OpenAI: "gpt-4..."
+            # But we strip common prefixes to be safe (e.g. zhipu/glm-4 -> glm-4)
+            if model:
+                for prefix in ["zhipu/", "zai/", "openai/", "anthropic/", "gemini/", "openrouter/"]:
+                    if model.startswith(prefix) and "openrouter" not in self.api_base:
+                        # Don't strip openrouter/ if using OpenRouter (though usually handled by base_url)
+                        # Actually for direct provider calls via AsyncOpenAI, we usually want the raw model name
+                        model = model[len(prefix):]
+                        break
             
             kwargs = {
                 "model": model,

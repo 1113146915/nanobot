@@ -30,11 +30,21 @@ class FeishuConfig(BaseModel):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
 
 
+class JsonBotConfig(BaseModel):
+    """JsonBot channel configuration."""
+    enabled: bool = False
+    host: str = "127.0.0.1"  # json_bot server host
+    port: int = 5000         # json_bot server port
+    listen_port: int = 5001  # Local port to listen for webhooks
+    allow_from: list[str] = Field(default_factory=list)
+
+
 class ChannelsConfig(BaseModel):
     """Configuration for chat channels."""
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    json_bot: JsonBotConfig = Field(default_factory=JsonBotConfig)
 
 
 class AgentDefaults(BaseModel):
