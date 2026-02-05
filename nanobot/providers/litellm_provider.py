@@ -1,12 +1,19 @@
 """LiteLLM provider implementation for multi-provider support."""
 
 import os
+import json
 from typing import Any
 
-import litellm
-from litellm import acompletion
-
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+
+try:
+    import litellm
+    from litellm import acompletion
+    HAS_LITELLM = True
+except ImportError:
+    HAS_LITELLM = False
+    litellm = None
+    from openai import AsyncOpenAI
 
 
 class LiteLLMProvider(LLMProvider):
@@ -35,30 +42,41 @@ class LiteLLMProvider(LLMProvider):
         # Track if using custom endpoint (vLLM, etc.)
         self.is_vllm = bool(api_base) and not self.is_openrouter
         
-        # Configure LiteLLM based on provider
-        if api_key:
-            if self.is_openrouter:
-                # OpenRouter mode - set key
-                os.environ["OPENROUTER_API_KEY"] = api_key
-            elif self.is_vllm:
-                # vLLM/custom endpoint - uses OpenAI-compatible API
-                os.environ["OPENAI_API_KEY"] = api_key
-            elif "anthropic" in default_model:
-                os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
-            elif "openai" in default_model or "gpt" in default_model:
-                os.environ.setdefault("OPENAI_API_KEY", api_key)
-            elif "gemini" in default_model.lower():
-                os.environ.setdefault("GEMINI_API_KEY", api_key)
-            elif "zhipu" in default_model or "glm" in default_model or "zai" in default_model:
-                os.environ.setdefault("ZHIPUAI_API_KEY", api_key)
-            elif "groq" in default_model:
-                os.environ.setdefault("GROQ_API_KEY", api_key)
-        
-        if api_base:
-            litellm.api_base = api_base
-        
-        # Disable LiteLLM logging noise
-        litellm.suppress_debug_info = True
+        if HAS_LITELLM:
+            # Configure LiteLLM based on provider
+            if api_key:
+                if self.is_openrouter:
+                    # OpenRouter mode - set key
+                    os.environ["OPENROUTER_API_KEY"] = api_key
+                elif self.is_vllm:
+                    # vLLM/custom endpoint - uses OpenAI-compatible API
+                    os.environ["OPENAI_API_KEY"] = api_key
+                elif "anthropic" in default_model:
+                    os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+                elif "openai" in default_model or "gpt" in default_model:
+                    os.environ.setdefault("OPENAI_API_KEY", api_key)
+                elif "gemini" in default_model.lower():
+                    os.environ.setdefault("GEMINI_API_KEY", api_key)
+                elif "zhipu" in default_model or "glm" in default_model or "zai" in default_model:
+                    os.environ.setdefault("ZHIPUAI_API_KEY", api_key)
+                elif "groq" in default_model:
+                    os.environ.setdefault("GROQ_API_KEY", api_key)
+            
+            if api_base:
+                litellm.api_base = api_base
+            
+            # Disable LiteLLM logging noise
+            litellm.suppress_debug_info = True
+        else:
+            # Fallback using OpenAI client directly
+            self.client = None
+            if api_key:
+                base_url = api_base
+                if self.is_openrouter and not base_url:
+                    base_url = "https://openrouter.ai/api/v1"
+                
+                # If no base_url and not OpenRouter, default to OpenAI's default (implied by None)
+                self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     
     async def chat(
         self,
@@ -69,7 +87,7 @@ class LiteLLMProvider(LLMProvider):
         temperature: float = 0.7,
     ) -> LLMResponse:
         """
-        Send a chat completion request via LiteLLM.
+        Send a chat completion request via LiteLLM or fallback.
         
         Args:
             messages: List of message dicts with 'role' and 'content'.
@@ -83,55 +101,84 @@ class LiteLLMProvider(LLMProvider):
         """
         model = model or self.default_model
         
-        # For OpenRouter, prefix model name if not already prefixed
-        if self.is_openrouter and not model.startswith("openrouter/"):
-            model = f"openrouter/{model}"
-        
-        # For Zhipu/Z.ai, ensure prefix is present
-        # Handle cases like "glm-4.7-flash" -> "zai/glm-4.7-flash"
-        if ("glm" in model.lower() or "zhipu" in model.lower()) and not (
-            model.startswith("zhipu/") or 
-            model.startswith("zai/") or 
-            model.startswith("openrouter/")
-        ):
-            model = f"zai/{model}"
-        
-        # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
-        # Convert openai/ prefix to hosted_vllm/ if user specified it
-        if self.is_vllm:
-            model = f"hosted_vllm/{model}"
-        
-        # For Gemini, ensure gemini/ prefix if not already present
-        if "gemini" in model.lower() and not model.startswith("gemini/"):
-            model = f"gemini/{model}"
-        
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        
-        # Pass api_base directly for custom endpoints (vLLM, etc.)
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
-        
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-        
-        try:
-            response = await acompletion(**kwargs)
-            return self._parse_response(response)
-        except Exception as e:
-            # Return error as content for graceful handling
-            return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
-                finish_reason="error",
-            )
+        if HAS_LITELLM:
+            # For OpenRouter, prefix model name if not already prefixed
+            if self.is_openrouter and not model.startswith("openrouter/"):
+                model = f"openrouter/{model}"
+            
+            # For Zhipu/Z.ai, ensure prefix is present
+            if ("glm" in model.lower() or "zhipu" in model.lower()) and not (
+                model.startswith("zhipu/") or 
+                model.startswith("zai/") or 
+                model.startswith("openrouter/")
+            ):
+                model = f"zai/{model}"
+            
+            # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
+            if self.is_vllm:
+                model = f"hosted_vllm/{model}"
+            
+            # For Gemini, ensure gemini/ prefix if not already present
+            if "gemini" in model.lower() and not model.startswith("gemini/"):
+                model = f"gemini/{model}"
+            
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            
+            # Pass api_base directly for custom endpoints (vLLM, etc.)
+            if self.api_base:
+                kwargs["api_base"] = self.api_base
+            
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+            
+            try:
+                response = await acompletion(**kwargs)
+                return self._parse_response(response)
+            except Exception as e:
+                return LLMResponse(
+                    content=f"Error calling LLM: {str(e)}",
+                    finish_reason="error",
+                )
+        else:
+            # Fallback implementation
+            if not self.client:
+                return LLMResponse(
+                    content="Error: No API key configured and 'litellm' is not installed. Please install 'litellm' or configure an OpenAI-compatible API key.",
+                    finish_reason="error"
+                )
+            
+            # In fallback mode, we assume 'model' is correct for the provider.
+            # E.g. for OpenRouter: "anthropic/claude..."
+            # For OpenAI: "gpt-4..."
+            
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+            
+            try:
+                response = await self.client.chat.completions.create(**kwargs)
+                return self._parse_response(response)
+            except Exception as e:
+                return LLMResponse(
+                    content=f"Error calling LLM (fallback): {str(e)}",
+                    finish_reason="error",
+                )
     
     def _parse_response(self, response: Any) -> LLMResponse:
-        """Parse LiteLLM response into our standard format."""
+        """Parse response into our standard format."""
         choice = response.choices[0]
         message = choice.message
         
