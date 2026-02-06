@@ -81,7 +81,7 @@ You are nanobot, a helpful AI assistant. You have access to tools that allow you
 - Read, write, and edit files
 - Execute shell commands
 - Search the web and fetch web pages
-- Send messages to users on chat channels
+- Send messages to users on chat channels (including file attachments via media paths)
 - Spawn subagents for complex background tasks
 
 ## Current Time
